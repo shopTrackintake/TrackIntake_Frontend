@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { toast } from "react-hot-toast";
 import { sendOtp, verifyOtp, registerUser } from "../../../api/auth";
+import { getPlatformPricingConfig } from "../../../api/nutritionistApi";
 
 const SPECIALIZATION_OPTIONS = [
   "Weight Management",
@@ -95,6 +96,28 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
   const [fieldErrors, setFieldErrors] = useState({});
 
   const [serverError, setServerError] = useState("");
+  const [pricingConfig, setPricingConfig] = useState({
+    inhouse_online_price: 499,
+    inhouse_offline_price: 499,
+    expert_fixed_pricing_enabled: false,
+    expert_online_price: 999,
+    expert_offline_price: 999,
+  });
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    getPlatformPricingConfig()
+      .then((res) => {
+        if (active && res?.data) {
+          setPricingConfig(res.data);
+        }
+      })
+      .catch(() => {
+        // Fallback to defaults silently if network fails
+      });
+    return () => { active = false; };
+  }, [isOpen]);
 
   // Whenever email changes, immediately invalidate any stale OTP or token
   const handleEmailChange = (val) => {
@@ -193,7 +216,7 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
         errors.appointmentMode = "Please enable at least one consultation mode (Online or Offline).";
       }
 
-      if (nutritionistType === "expert") {
+      if (nutritionistType === "expert" && !pricingConfig.expert_fixed_pricing_enabled) {
         if (isOnlineAvailable) {
           if (onlinePrice === "" || isNaN(parseFloat(onlinePrice)) || parseFloat(onlinePrice) < 0) {
             errors.onlinePrice = "Please enter a valid online consultation fee (₹0 or more).";
@@ -274,14 +297,20 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
     clearError("otp");
     try {
       console.log(`🔑 [OTP Request] Sending OTP to ${normalizedEmail}...`);
-      const otpRes = await sendOtp(normalizedEmail);
+      const otpRes = await sendOtp(normalizedEmail, phoneNumber.trim());
       console.log(`✅ [OTP Request Success]`, otpRes?.data);
       toast.success(`OTP sent to ${normalizedEmail}. Valid for 10 minutes.`);
       setOtpSent(true);
       setOtpTimer(600);
     } catch (error) {
       console.error("❌ [OTP Request Error]:", error);
-      let errMsg = error?.response?.data?.email?.[0] || error?.response?.data?.email || error?.response?.data?.message || error?.response?.data?.error;
+      const resData = error?.response?.data;
+      let errMsg =
+        resData?.phone_number?.[0] ||
+        resData?.email?.[0] ||
+        resData?.email ||
+        resData?.message ||
+        resData?.error;
       if (!errMsg) {
         if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
           errMsg = "Request timed out while contacting server. Please check your network and try again.";
@@ -289,12 +318,17 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
           errMsg = error?.message || "Failed to send OTP.";
         }
       }
-      setFieldErrors((prev) => ({ ...prev, email: errMsg, otp: errMsg }));
+      setFieldErrors((prev) => ({
+        ...prev,
+        ...(resData?.phone_number ? { phoneNumber: Array.isArray(resData.phone_number) ? resData.phone_number[0] : resData.phone_number } : {}),
+        ...(resData?.email ? { email: Array.isArray(resData.email) ? resData.email[0] : resData.email } : {}),
+        otp: errMsg,
+      }));
       setServerError(errMsg);
-      if (error?.response?.data?.email) {
+      if (resData?.email || resData?.phone_number) {
         setStep(1);
       }
-      toast.error(errMsg);
+      toast.error(errMsg, { duration: 6000 });
     } finally {
       setSendingOtp(false);
     }
@@ -388,8 +422,24 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
       formData.append("is_online_available", isOnlineAvailable);
       formData.append("is_offline_available", isOfflineAvailable);
       formData.append("offline_location", offlineLocation || "");
-      formData.append("online_price", nutritionistType === "expert" && onlinePrice ? parseFloat(onlinePrice) : 0);
-      formData.append("offline_price", nutritionistType === "expert" && offlinePrice ? parseFloat(offlinePrice) : 0);
+      const resolvedOnlinePrice =
+        nutritionistType === "inhouse"
+          ? pricingConfig.inhouse_online_price
+          : pricingConfig.expert_fixed_pricing_enabled
+          ? pricingConfig.expert_online_price
+          : onlinePrice
+          ? parseFloat(onlinePrice)
+          : 0;
+      const resolvedOfflinePrice =
+        nutritionistType === "inhouse"
+          ? pricingConfig.inhouse_offline_price
+          : pricingConfig.expert_fixed_pricing_enabled
+          ? pricingConfig.expert_offline_price
+          : offlinePrice
+          ? parseFloat(offlinePrice)
+          : 0;
+      formData.append("online_price", Number.isFinite(Number(resolvedOnlinePrice)) ? Number(resolvedOnlinePrice) : 0);
+      formData.append("offline_price", Number.isFinite(Number(resolvedOfflinePrice)) ? Number(resolvedOfflinePrice) : 0);
       formData.append("offline_payment_required", offlinePaymentRequired);
 
       // Files
@@ -1192,7 +1242,7 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
                   <span className="text-xs font-extrabold uppercase tracking-wider text-[var(--color-primary)] flex items-center gap-2">
                     <DollarSign size={16} /> Section 2: Consultation Fee Structure (₹)
                   </span>
-                  {nutritionistType === "inhouse" && (
+                  {(nutritionistType === "inhouse" || pricingConfig.expert_fixed_pricing_enabled) && (
                     <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200 flex items-center gap-1">
                       <ShieldCheck size={13} /> Standard Platform Rates
                     </span>
@@ -1207,8 +1257,33 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
                       <span>Standardized Platform Consultation Pricing</span>
                     </div>
                     <p className="text-xs text-emerald-700 leading-relaxed">
-                      As an In-House Nutritionist, your consultations follow standard platform session pricing and covered patient care plans. Patients can book your available slots immediately without needing custom price quotes or separate invoicing.
+                      As an In-House Nutritionist, your consultations follow standard platform session pricing (Online: <strong>₹{pricingConfig.inhouse_online_price}</strong>, In-Clinic: <strong>₹{pricingConfig.inhouse_offline_price}</strong>) and covered patient care plans. Patients can book your available slots immediately without needing custom price quotes.
                     </p>
+                  </div>
+                ) : pricingConfig.expert_fixed_pricing_enabled ? (
+                  /* Expert Practitioner with Platform-Enforced Fixed Slot Rates */
+                  <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-3">
+                    <div className="flex items-center gap-2 text-emerald-800 font-bold text-xs sm:text-sm">
+                      <ShieldCheck size={18} className="text-emerald-600 shrink-0" />
+                      <span>Default Fixed Consultation Rates (Platform Enforced)</span>
+                    </div>
+                    <p className="text-xs text-emerald-700 leading-relaxed">
+                      Fixed Price Slots currently use standard platform-controlled rates. For <strong>Variable Case Slots</strong>, you will still review patient medical dossiers and send custom fee quotes per case.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      {isOnlineAvailable && (
+                        <div className="p-3 rounded-xl bg-white border border-emerald-200 shadow-2xs">
+                          <span className="text-[11px] font-bold text-slate-500 block">Online Fixed Slot Rate</span>
+                          <span className="text-lg font-black text-slate-900">₹{pricingConfig.expert_online_price}</span>
+                        </div>
+                      )}
+                      {isOfflineAvailable && (
+                        <div className="p-3 rounded-xl bg-white border border-emerald-200 shadow-2xs">
+                          <span className="text-[11px] font-bold text-slate-500 block">In-Clinic Fixed Slot Rate</span>
+                          <span className="text-lg font-black text-slate-900">₹{pricingConfig.expert_offline_price}</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   /* Expert Practitioner Rates */
@@ -1469,25 +1544,64 @@ const NutritionistRegistrationModal = ({ isOpen, onClose, onSuccess }) => {
   );
 };
 
-const FileInputField = ({ label, file, setFile, isImage = false }) => (
-  <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--color-bg-app)] border border-[var(--color-border-default)] flex items-center justify-between gap-3">
-    <div className="truncate min-w-0 flex-1">
-      <p className="text-xs sm:text-sm font-bold text-[var(--color-text-strong)] truncate">{label}</p>
-      <p className="text-[11px] sm:text-xs text-[var(--color-text-muted)] truncate mt-0.5">
-        {file ? file.name : isImage ? "Optional photo - JPG, PNG, JPEG, WEBP" : "Optional attachment - PDF, JPG, JPEG, PNG, WEBP, DOC"}
-      </p>
+const MAX_DOC_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+const FileInputField = ({ label, file, setFile, isImage = false }) => {
+  const handleFileChange = (e) => {
+    const selected = e.target.files?.[0];
+    if (!selected) return;
+
+    if (selected.size > MAX_DOC_SIZE_BYTES) {
+      toast.error(`${selected.name} exceeds 10 MB. Please choose a smaller file.`);
+      e.target.value = "";
+      return;
+    }
+
+    const ext = selected.name.includes(".") ? `.${selected.name.split(".").pop().toLowerCase()}` : "";
+    const allowed = isImage
+      ? [".jpg", ".jpeg", ".png", ".webp"]
+      : [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".doc", ".docx", ".rtf", ".odt"];
+    if (ext && !allowed.includes(ext)) {
+      toast.error(`Unsupported file type (${ext}). Allowed: ${isImage ? "JPG, PNG, WEBP" : "PDF, JPG, PNG, WEBP, DOC, DOCX"}.`);
+      e.target.value = "";
+      return;
+    }
+
+    setFile(selected);
+  };
+
+  return (
+    <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--color-bg-app)] border border-[var(--color-border-default)] flex items-center justify-between gap-3">
+      <div className="truncate min-w-0 flex-1">
+        <p className="text-xs sm:text-sm font-bold text-[var(--color-text-strong)] truncate">{label}</p>
+        <p className="text-[11px] sm:text-xs text-[var(--color-text-muted)] truncate mt-0.5">
+          {file ? `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)` : isImage ? "Optional photo - JPG, PNG, JPEG, WEBP (max 10 MB)" : "Optional attachment - PDF, JPG, PNG, WEBP, DOC (max 10 MB)"}
+        </p>
+      </div>
+      <div className="flex items-center gap-1.5 shrink-0">
+        {file && (
+          <button
+            type="button"
+            onClick={() => setFile(null)}
+            title="Remove file"
+            className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 border border-rose-500/20 cursor-pointer transition-all"
+          >
+            <X size={14} />
+          </button>
+        )}
+        <label className="px-3.5 py-2 rounded-xl bg-[var(--color-bg-surface)] hover:bg-[var(--color-bg-interactive-subtle)] border border-[var(--color-border-default)] text-xs font-bold text-[var(--color-primary)] cursor-pointer flex items-center gap-1.5 transition-all">
+          {isImage ? <ImageIcon size={14} /> : <Upload size={14} />}
+          <span>{file ? "Change" : "Browse"}</span>
+          <input
+            type="file"
+            accept={isImage ? "image/jpeg,image/png,image/jpg,image/webp" : ".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,.rtf,.odt,application/pdf,image/*"}
+            onChange={handleFileChange}
+            className="hidden"
+          />
+        </label>
+      </div>
     </div>
-    <label className="px-3.5 py-2 rounded-xl bg-[var(--color-bg-surface)] hover:bg-[var(--color-bg-interactive-subtle)] border border-[var(--color-border-default)] text-xs font-bold text-[var(--color-primary)] cursor-pointer shrink-0 flex items-center gap-1.5 transition-all">
-      {isImage ? <ImageIcon size={14} /> : <Upload size={14} />}
-      <span>{file ? "Change" : "Browse"}</span>
-      <input
-        type="file"
-        accept={isImage ? "image/jpeg,image/png,image/jpg,image/webp,image/*" : ".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,application/pdf,image/*"}
-        onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])}
-        className="hidden"
-      />
-    </label>
-  </div>
-);
+  );
+};
 
 export default NutritionistRegistrationModal;
